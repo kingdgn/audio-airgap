@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Audio Airgap Receiver</title>
+  <title>音频离线接收器</title>
   <style>
     :root {
       --bg: #f6f7f4;
@@ -191,23 +191,23 @@
 </head>
 <body>
   <header>
-    <h1>Audio Airgap Receiver</h1>
+    <h1>音频离线接收器</h1>
   </header>
   <main>
     <section>
-      <h2>Recorder</h2>
+      <h2>录音接收</h2>
       <div class="row">
         <div>
-          <label for="channels">Channels</label>
+          <label for="channels">并行通道</label>
           <select id="channels">
-            <option value="12" selected>12 stable</option>
-            <option value="16">16 faster</option>
-            <option value="20">20 fastest</option>
-            <option value="8">8 conservative</option>
+            <option value="12" selected>12 稳定</option>
+            <option value="16">16 更快</option>
+            <option value="20">20 最快</option>
+            <option value="8">8 保守</option>
           </select>
         </div>
         <div>
-          <label for="symbolMs">Symbol ms</label>
+          <label for="symbolMs">符号时长 ms</label>
           <select id="symbolMs">
             <option value="10" selected>10</option>
             <option value="20">20</option>
@@ -216,35 +216,35 @@
       </div>
       <div class="row">
         <div>
-          <label for="threshold">Threshold</label>
+          <label for="threshold">声音阈值</label>
           <input id="threshold" type="number" value="0.012" min="0.001" max="0.2" step="0.001">
         </div>
         <div>
-          <label for="searchMs">Search ms</label>
+          <label for="searchMs">对齐搜索 ms</label>
           <input id="searchMs" type="number" value="40" min="0" max="120" step="5">
         </div>
       </div>
       <div class="buttons">
-        <button id="startBtn" type="button">Start</button>
-        <button id="stopBtn" class="danger" type="button" disabled>Stop</button>
+        <button id="startBtn" type="button">开始</button>
+        <button id="stopBtn" class="danger" type="button" disabled>停止</button>
       </div>
-      <button id="resetBtn" class="secondary" type="button">Reset State</button>
-      <label for="missingText">Missing indexes</label>
+      <button id="resetBtn" class="secondary" type="button">重置状态</button>
+      <label for="missingText">缺失片段序号</label>
       <textarea id="missingText" readonly></textarea>
       <div class="actions">
-        <button id="copyMissingBtn" class="secondary" type="button">Copy Missing</button>
+        <button id="copyMissingBtn" class="secondary" type="button">复制缺片列表</button>
       </div>
     </section>
     <section>
-      <h2>Status</h2>
+      <h2>接收状态</h2>
       <div class="metrics">
-        <div class="metric"><span>Recording</span><strong id="recordingState">Idle</strong></div>
-        <div class="metric"><span>Valid Frames</span><strong id="validFrames">0</strong></div>
-        <div class="metric"><span>Received</span><strong id="received">0/0</strong></div>
+        <div class="metric"><span>录音状态</span><strong id="recordingState">待机</strong></div>
+        <div class="metric"><span>有效帧</span><strong id="validFrames">0</strong></div>
+        <div class="metric"><span>已接收</span><strong id="received">0/0</strong></div>
         <div class="metric"><span>SHA256</span><strong id="shaState">-</strong></div>
       </div>
       <div class="bar"><div id="progressBar"></div></div>
-      <div id="statusLine" class="statusline">Ready.</div>
+      <div id="statusLine" class="statusline">准备就绪。</div>
       <div id="downloadActions" class="actions"></div>
       <pre id="log"></pre>
     </section>
@@ -538,7 +538,7 @@
       if (frame.type === FRAME_MANIFEST) {
         const text = new TextDecoder().decode(frame.payload);
         rx.manifest = JSON.parse(text);
-        logLine(`manifest ${rx.manifest.filename}, total=${rx.manifest.total}`);
+        logLine(`收到清单 ${rx.manifest.filename}，总片数=${rx.manifest.total}`);
       } else if (frame.type === FRAME_DATA) {
         if (!rx.dataByFile.has(frame.fileId)) rx.dataByFile.set(frame.fileId, new Map());
         rx.dataByFile.get(frame.fileId).set(frame.index, frame.payload.slice());
@@ -573,16 +573,16 @@
         els.shaState.className = "";
       }
       els.statusLine.textContent = rx.manifest
-        ? `${rx.manifest.filename} | missing ${missing.length} | bad segments ${rx.badSegments}`
-        : `waiting for manifest | bad segments ${rx.badSegments}`;
+        ? `${rx.manifest.filename} | 缺失 ${missing.length} | 错误片段 ${rx.badSegments}`
+        : `等待清单帧 | 错误片段 ${rx.badSegments}`;
       els.log.textContent = JSON.stringify({
-        manifest_seen: !!rx.manifest,
-        valid_frames: rx.validFrames,
-        received,
-        total,
-        missing_count: missing.length,
-        bad_segments: rx.badSegments,
-        sample_rate: audioContext ? audioContext.sampleRate : null
+        "已收到清单": !!rx.manifest,
+        "有效帧": rx.validFrames,
+        "已接收": received,
+        "总片数": total,
+        "缺失数量": missing.length,
+        "错误片段": rx.badSegments,
+        "采样率": audioContext ? audioContext.sampleRate : null
       }, null, 2);
     }
 
@@ -608,7 +608,7 @@
       const trimmed = all.subarray(0, expectedSize);
       const hash = await sha256Hex(trimmed);
       const ok = hash.toLowerCase() === String(rx.manifest.sha256).toLowerCase();
-      els.shaState.textContent = ok ? "OK" : "FAIL";
+      els.shaState.textContent = ok ? "通过" : "失败";
       els.shaState.className = ok ? "ok" : "bad";
       if (rx.downloadUrl) URL.revokeObjectURL(rx.downloadUrl);
       const blob = new Blob([trimmed], { type: "application/octet-stream" });
@@ -617,9 +617,9 @@
       const link = document.createElement("a");
       link.href = rx.downloadUrl;
       link.download = rx.manifest.filename || "recovered.bin";
-      link.textContent = "Download File";
+      link.textContent = "下载文件";
       els.downloadActions.appendChild(link);
-      logLine(`recovered sha256=${hash} ok=${ok}`);
+      logLine(`已恢复 sha256=${hash}，校验通过=${ok}`);
     }
 
     async function sha256Hex(bytes) {
@@ -656,7 +656,7 @@
       zeroGain.connect(audioContext.destination);
       els.startBtn.disabled = true;
       els.stopBtn.disabled = false;
-      els.recordingState.textContent = "On";
+      els.recordingState.textContent = "录音中";
       els.recordingState.className = "ok";
       updateUi();
     }
@@ -672,7 +672,7 @@
       zeroGain = null;
       els.startBtn.disabled = false;
       els.stopBtn.disabled = true;
-      els.recordingState.textContent = "Idle";
+      els.recordingState.textContent = "待机";
       els.recordingState.className = "";
       updateUi();
     }
@@ -713,7 +713,7 @@
     els.resetBtn.addEventListener("click", () => resetState());
     els.copyMissingBtn.addEventListener("click", async () => {
       await navigator.clipboard.writeText(els.missingText.value);
-      els.statusLine.textContent = "Missing list copied.";
+      els.statusLine.textContent = "缺片列表已复制。";
     });
     updateUi();
   </script>
