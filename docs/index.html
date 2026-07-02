@@ -321,7 +321,12 @@
     let segmentLength = 0;
     let inactiveSamples = 0;
     let decoding = Promise.resolve();
-
+    let decodeEpoch = 0;
+    let recordedChunks = [];
+    let recordedLength = 0;
+    let recordedSampleRate = 48000;
+    let recordingDownloadUrl = null;
+    let diagDownloadUrl = null;
     const rx = {
       manifest: null,
       dataByFile: new Map(),
@@ -593,7 +598,8 @@
       segmentLength = 0;
       inactiveSamples = 0;
       if (finished.length >= minSegment) {
-        decoding = decoding.then(() => decodeSegment(finished)).catch(err => logLine(String(err)));
+        const epoch = decodeEpoch;
+        decoding = decoding.then(() => epoch === decodeEpoch ? decodeSegment(finished) : undefined).catch(err => logLine(String(err)));
       }
     }
 
@@ -934,19 +940,25 @@
     }
 
     async function stopRecording() {
-      if (audioContext) {
-        processPending();
-        finishActiveSegment();
-        await decoding;
-      }
+      els.stopBtn.disabled = true;
+      els.recordingState.textContent = "正在停止";
+      decodeEpoch += 1;
       if (processor) processor.disconnect();
       if (zeroGain) zeroGain.disconnect();
       if (stream) stream.getTracks().forEach(track => track.stop());
-      if (audioContext) await audioContext.close();
+      const ctx = audioContext;
       audioContext = null;
       stream = null;
       processor = null;
       zeroGain = null;
+      resetRuntimeBuffers(false);
+      if (ctx) {
+        try {
+          await ctx.close();
+        } catch (_error) {
+          // Some mobile browsers close an AudioContext asynchronously after input tracks stop.
+        }
+      }
       els.startBtn.disabled = false;
       els.stopBtn.disabled = true;
       els.recordingState.textContent = "待机";
@@ -954,19 +966,19 @@
       els.audioLevelText.textContent = "无输入";
       els.levelBar.style.width = "0%";
       els.levelMeter.classList.remove("active");
+      updateRecordingUi();
       updateUi();
     }
-
-    function resetRuntimeBuffers() {
+    function resetRuntimeBuffers(cancelDecoding = true) {
       pending = [];
       pendingLength = 0;
       active = false;
       segment = [];
       segmentLength = 0;
       inactiveSamples = 0;
+      if (cancelDecoding) decodeEpoch += 1;
       decoding = Promise.resolve();
     }
-
     function resetState() {
       if (rx.downloadUrl) URL.revokeObjectURL(rx.downloadUrl);
       rx.manifest = null;
@@ -983,13 +995,16 @@
     }
 
     els.startBtn.addEventListener("click", () => {
+      els.startBtn.disabled = true;
+      els.statusLine.textContent = "正在请求麦克风权限...";
       startRecording().catch(error => {
         els.statusLine.textContent = String(error);
         els.startBtn.disabled = false;
         els.stopBtn.disabled = true;
+        resetRuntimeBuffers();
       });
     });
-    els.stopBtn.addEventListener("click", () => stopRecording());
+    els.stopBtn.addEventListener("click", () => { stopRecording().catch(error => { els.statusLine.textContent = String(error); }); });
     els.resetBtn.addEventListener("click", () => resetState());
     els.copyMissingBtn.addEventListener("click", async () => {
       await navigator.clipboard.writeText(els.missingText.value);
