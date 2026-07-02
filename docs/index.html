@@ -255,12 +255,12 @@
       </div>
       <div class="row">
         <div>
-          <label for="threshold">声音阈值</label>
+          <label for="threshold">调制音阈值</label>
           <input id="threshold" type="number" value="0.012" min="0.001" max="0.2" step="0.001">
         </div>
         <div>
           <label for="searchMs">对齐搜索 ms</label>
-          <input id="searchMs" type="number" value="40" min="0" max="120" step="5">
+          <input id="searchMs" type="number" value="120" min="0" max="200" step="5">
         </div>
       </div>
       <div class="buttons">
@@ -272,6 +272,8 @@
       <textarea id="missingText" readonly></textarea>
       <div class="actions">
         <button id="copyMissingBtn" class="secondary" type="button">复制缺片列表</button>
+        <button id="downloadRecordingBtn" class="secondary" type="button" disabled>下载录音 WAV</button>
+        <button id="downloadDiagBtn" class="secondary" type="button">下载诊断 JSON</button>
       </div>
     </section>
     <section>
@@ -281,6 +283,7 @@
         <div class="metric"><span>有效帧</span><strong id="validFrames">0</strong></div>
         <div class="metric"><span>已接收</span><strong id="received">0/0</strong></div>
         <div class="metric"><span>SHA256</span><strong id="shaState">-</strong></div>
+        <div class="metric"><span>录音缓存</span><strong id="recordedTime">0s</strong></div>
       </div>
       <div class="bar"><div id="progressBar"></div></div>
       <div class="audio-panel">
@@ -304,7 +307,7 @@
     const FRAME_DATA = 2;
     const PILOT_HZ = 880;
     const PILOT_MS = 180;
-    const BLOCK_MS = 5;
+    const BLOCK_MS = 10;
     const END_GAP_MS = 100;
 
     let audioContext = null;
@@ -333,6 +336,8 @@
       stopBtn: document.getElementById("stopBtn"),
       resetBtn: document.getElementById("resetBtn"),
       copyMissingBtn: document.getElementById("copyMissingBtn"),
+      downloadRecordingBtn: document.getElementById("downloadRecordingBtn"),
+      downloadDiagBtn: document.getElementById("downloadDiagBtn"),
       channels: document.getElementById("channels"),
       symbolMs: document.getElementById("symbolMs"),
       threshold: document.getElementById("threshold"),
@@ -341,6 +346,7 @@
       validFrames: document.getElementById("validFrames"),
       received: document.getElementById("received"),
       shaState: document.getElementById("shaState"),
+      recordedTime: document.getElementById("recordedTime"),
       progressBar: document.getElementById("progressBar"),
       audioLevelText: document.getElementById("audioLevelText"),
       levelMeter: document.getElementById("levelMeter"),
@@ -415,19 +421,137 @@
       return out;
     }
 
+
+    function formatDuration(seconds) {
+      const s = Math.max(0, Math.floor(seconds));
+      const m = Math.floor(s / 60);
+      const r = s % 60;
+      return m ? `${m}m ${String(r).padStart(2, "0")}s` : `${r}s`;
+    }
+
+    function resetRecordingBuffer() {
+      if (recordingDownloadUrl) URL.revokeObjectURL(recordingDownloadUrl);
+      if (diagDownloadUrl) URL.revokeObjectURL(diagDownloadUrl);
+      recordedChunks = [];
+      recordedLength = 0;
+      recordedSampleRate = audioContext ? audioContext.sampleRate : 48000;
+      recordingDownloadUrl = null;
+      diagDownloadUrl = null;
+      updateRecordingUi();
+    }
+
+    function updateRecordingUi() {
+      const seconds = recordedSampleRate ? recordedLength / recordedSampleRate : 0;
+      els.recordedTime.textContent = formatDuration(seconds);
+      els.downloadRecordingBtn.disabled = recordedLength <= 0;
+    }
+
+    function recordInput(input) {
+      const pcm = new Int16Array(input.length);
+      for (let i = 0; i < input.length; i++) {
+        const sample = Math.max(-1, Math.min(1, input[i]));
+        pcm[i] = sample < 0 ? Math.round(sample * 32768) : Math.round(sample * 32767);
+      }
+      recordedChunks.push(pcm);
+      recordedLength += pcm.length;
+      updateRecordingUi();
+    }
+
+    function writeAscii(view, offset, text) {
+      for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i));
+    }
+
+    function buildRecordedWavBlob() {
+      const byteLength = recordedLength * 2;
+      const buffer = new ArrayBuffer(44 + byteLength);
+      const view = new DataView(buffer);
+      writeAscii(view, 0, "RIFF");
+      view.setUint32(4, 36 + byteLength, true);
+      writeAscii(view, 8, "WAVE");
+      writeAscii(view, 12, "fmt ");
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, recordedSampleRate, true);
+      view.setUint32(28, recordedSampleRate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      writeAscii(view, 36, "data");
+      view.setUint32(40, byteLength, true);
+      let offset = 44;
+      for (const chunk of recordedChunks) {
+        for (let i = 0; i < chunk.length; i++, offset += 2) view.setInt16(offset, chunk[i], true);
+      }
+      return new Blob([buffer], { type: "audio/wav" });
+    }
+
+    function downloadBlob(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+    }
+
+    function downloadRecording() {
+      if (!recordedLength) return;
+      downloadBlob(buildRecordedWavBlob(), `audio-airgap-recording-${Date.now()}.wav`);
+    }
+
+    function diagnosticSnapshot() {
+      const { data, total } = targetData();
+      return {
+        time: new Date().toISOString(),
+        config: currentConfig(),
+        threshold: Number(els.threshold.value || "0.012"),
+        searchMs: Number(els.searchMs.value || "120"),
+        manifest: rx.manifest,
+        validFrames: rx.validFrames,
+        received: data.size,
+        total,
+        missing: missingList(),
+        badSegments: rx.badSegments,
+        recordedSampleRate,
+        recordedSamples: recordedLength,
+        recordedSeconds: recordedSampleRate ? recordedLength / recordedSampleRate : 0,
+        statusLine: els.statusLine.textContent,
+        log: els.log.textContent
+      };
+    }
+
+    function downloadDiagnostics() {
+      const json = JSON.stringify(diagnosticSnapshot(), null, 2);
+      downloadBlob(new Blob([json], { type: "application/json" }), `audio-airgap-diagnostic-${Date.now()}.json`);
+    }
+
     function rms(block) {
       let sum = 0;
       for (let i = 0; i < block.length; i++) sum += block[i] * block[i];
       return Math.sqrt(sum / Math.max(1, block.length));
     }
 
-    function updateAudioVisual(block, level, isActive) {
-      const pct = Math.max(0, Math.min(100, level * 900));
+    function modulationActivity(block, cfg) {
+      let targetPower = goertzelPower(block, 0, block.length, PILOT_HZ, cfg.sampleRate) * 1.5;
+      for (let ch = 0; ch < cfg.channels; ch++) {
+        for (let value = 0; value < 4; value++) {
+          targetPower += goertzelPower(block, 0, block.length, cfg.plan[ch][value], cfg.sampleRate);
+        }
+      }
+      const toneLevel = Math.sqrt(Math.max(0, targetPower)) / Math.max(1, block.length);
+      const level = rms(block);
+      return { level, toneLevel, score: toneLevel / (level + 0.000001) };
+    }
+
+    function updateAudioVisual(block, activity, isActive) {
+      const pct = Math.max(0, Math.min(100, activity.toneLevel * 900));
       els.levelBar.style.width = `${pct.toFixed(1)}%`;
       els.levelMeter.classList.toggle("active", isActive);
       els.audioLevelText.textContent = isActive
-        ? `检测到音频，RMS ${level.toFixed(4)}`
-        : `等待音频，RMS ${level.toFixed(4)}`;
+        ? `检测到调制音，tone ${activity.toneLevel.toFixed(4)}，score ${activity.score.toFixed(2)}`
+        : `等待调制音，tone ${activity.toneLevel.toFixed(4)}，score ${activity.score.toFixed(2)}`;
 
       const canvas = els.waveCanvas;
       const ctx = canvas.getContext("2d");
@@ -460,18 +584,31 @@
       segmentLength += block.length;
     }
 
+    function finishActiveSegment() {
+      if (!active || segmentLength <= 0) return;
+      const minSegment = Math.round((audioContext ? audioContext.sampleRate : 48000) * 0.25);
+      const finished = concatFloat32(segment, segmentLength);
+      active = false;
+      segment = [];
+      segmentLength = 0;
+      inactiveSamples = 0;
+      if (finished.length >= minSegment) {
+        decoding = decoding.then(() => decodeSegment(finished)).catch(err => logLine(String(err)));
+      }
+    }
+
     function processPending() {
       if (!audioContext) return;
       const blockSize = Math.max(64, Math.round(audioContext.sampleRate * BLOCK_MS / 1000));
       const endGap = Math.round(audioContext.sampleRate * END_GAP_MS / 1000);
-      const minSegment = Math.round(audioContext.sampleRate * 0.25);
       const threshold = Number(els.threshold.value || "0.012");
+      const cfg = currentConfig();
 
       while (pendingLength >= blockSize) {
         const block = shiftPending(blockSize);
-        const level = rms(block);
-        const isActive = level >= threshold;
-        updateAudioVisual(block, level, isActive);
+        const activity = modulationActivity(block, cfg);
+        const isActive = activity.toneLevel >= threshold && activity.score >= 0.36;
+        updateAudioVisual(block, activity, isActive);
         if (isActive) {
           if (!active) {
             active = true;
@@ -485,14 +622,7 @@
           appendSegment(block);
           inactiveSamples += block.length;
           if (inactiveSamples >= endGap) {
-            const finished = concatFloat32(segment, segmentLength);
-            active = false;
-            segment = [];
-            segmentLength = 0;
-            inactiveSamples = 0;
-            if (finished.length >= minSegment) {
-              decoding = decoding.then(() => decodeSegment(finished)).catch(err => logLine(String(err)));
-            }
+            finishActiveSegment();
           }
         }
       }
@@ -582,10 +712,46 @@
       return values;
     }
 
-    async function decodeSegment(samples) {
-      const cfg = currentConfig();
+    function percentile(values, p) {
+      if (!values.length) return 0;
+      const sorted = Array.from(values).sort((a, b) => a - b);
+      const idx = Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * p)));
+      return sorted[idx];
+    }
+
+    function pilotCandidateStarts(samples, cfg) {
+      const blockSize = Math.max(64, Math.round(cfg.sampleRate * 0.02));
+      const blockCount = Math.floor(samples.length / blockSize);
+      if (blockCount < 4) return [];
+      const levels = [];
+      for (let b = 0; b < blockCount; b++) {
+        const start = b * blockSize;
+        const power = goertzelPower(samples, start, blockSize, PILOT_HZ, cfg.sampleRate);
+        levels.push(Math.sqrt(Math.max(0, power)) / blockSize);
+      }
+      const peak = percentile(levels, 0.98);
+      const baseline = percentile(levels, 0.50);
+      if (peak <= Math.max(0.008, baseline * 4)) return [];
+      const gate = Math.max(peak * 0.45, baseline * 6);
+      const minBlocks = Math.max(2, Math.round(cfg.sampleRate * 0.08 / blockSize));
+      const pad = Math.round(cfg.sampleRate * 0.06);
+      const starts = [];
+      let runStart = null;
+      for (let i = 0; i < levels.length; i++) {
+        if (levels[i] >= gate && runStart === null) runStart = i;
+        else if (levels[i] < gate && runStart !== null) {
+          if (i - runStart >= minBlocks) starts.push(Math.max(0, runStart * blockSize - pad));
+          runStart = null;
+        }
+      }
+      if (runStart !== null && levels.length - runStart >= minBlocks) {
+        starts.push(Math.max(0, runStart * blockSize - pad));
+      }
+      return Array.from(new Set(starts));
+    }
+
+    function tryDecodeOne(samples, cfg, searchMs) {
       const pilotSamples = Math.round(cfg.sampleRate * PILOT_MS / 1000);
-      const searchMs = Number(els.searchMs.value || "40");
       for (const offset of offsetsForSearch(cfg.sampleRate, searchMs)) {
         const start = pilotSamples + offset;
         if (start < 0 || start >= samples.length) continue;
@@ -594,13 +760,28 @@
         if (!header) continue;
         const fullBytes = demodulateBytes(samples, start, header.frameLen, cfg);
         const frame = parseFrame(fullBytes);
+        if (frame) return frame;
+      }
+      return null;
+    }
+
+    async function decodeSegment(samples) {
+      const cfg = currentConfig();
+      const searchMs = Number(els.searchMs.value || "120");
+      const starts = pilotCandidateStarts(samples, cfg);
+      if (!starts.includes(0)) starts.unshift(0);
+      let decoded = 0;
+      for (const start of starts) {
+        const frame = tryDecodeOne(samples.subarray(start), cfg, searchMs);
         if (frame) {
           acceptFrame(frame);
-          return;
+          decoded += 1;
         }
       }
-      rx.badSegments += 1;
-      updateUi();
+      if (!decoded) {
+        rx.badSegments += 1;
+        updateUi();
+      }
     }
 
     function currentConfig() {
@@ -721,6 +902,7 @@
 
     async function startRecording() {
       resetRuntimeBuffers();
+      resetRecordingBuffer();
       stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: false,
@@ -730,12 +912,15 @@
         }
       });
       audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      recordedSampleRate = audioContext.sampleRate;
       const source = audioContext.createMediaStreamSource(stream);
       processor = audioContext.createScriptProcessor(4096, 1, 1);
       zeroGain = audioContext.createGain();
       zeroGain.gain.value = 0;
       processor.onaudioprocess = event => {
-        pushPending(event.inputBuffer.getChannelData(0));
+        const input = event.inputBuffer.getChannelData(0);
+        recordInput(input);
+        pushPending(input);
         processPending();
       };
       source.connect(processor);
@@ -749,6 +934,11 @@
     }
 
     async function stopRecording() {
+      if (audioContext) {
+        processPending();
+        finishActiveSegment();
+        await decoding;
+      }
       if (processor) processor.disconnect();
       if (zeroGain) zeroGain.disconnect();
       if (stream) stream.getTracks().forEach(track => track.stop());
@@ -805,6 +995,9 @@
       await navigator.clipboard.writeText(els.missingText.value);
       els.statusLine.textContent = "缺片列表已复制。";
     });
+    els.downloadRecordingBtn.addEventListener("click", downloadRecording);
+    els.downloadDiagBtn.addEventListener("click", downloadDiagnostics);
+    updateRecordingUi();
     updateUi();
   </script>
 </body>

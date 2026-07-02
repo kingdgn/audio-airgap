@@ -45,6 +45,8 @@ DEFAULT_CHUNK_SIZE = 512
 PILOT_HZ = 880.0
 PILOT_MS = 180
 GAP_MS = 160
+PILOT_DETECT_WINDOW_MS = 20
+PILOT_DETECT_PAD_MS = 60
 
 
 @dataclass(frozen=True)
@@ -319,9 +321,12 @@ def write_transfer_audio(
     selected: Iterable[int] | None = None,
     repeat_data: int = 1,
     manifest_repeat: int = 3,
+    tail_manifest_repeat: int = 3,
     write_frame_wavs: bool = False,
 ) -> dict:
     manifest = make_manifest(source, cfg, chunk_size)
+    manifest["manifest_repeat"] = manifest_repeat
+    manifest["tail_manifest_repeat"] = tail_manifest_repeat
     selected_list = sorted(set(selected)) if selected is not None else None
 
     frames_dir = wav_path.parent / "frames"
@@ -347,13 +352,74 @@ def write_transfer_audio(
                     with open_wave_writer(frames_dir / f"frame_{index:06d}_pass_{pass_no:02d}.wav", cfg.sample_rate) as wf:
                         wf.writeframes(float_to_pcm16(audio))
 
+        for repeat in range(tail_manifest_repeat):
+            audio = audio_for_frame(mframe, cfg)
+            combined.writeframes(float_to_pcm16(audio))
+            if write_frame_wavs:
+                with open_wave_writer(frames_dir / f"manifest_tail_{repeat:02d}.wav", cfg.sample_rate) as wf:
+                    wf.writeframes(float_to_pcm16(audio))
+
     manifest["written_data_frames"] = written_data
     manifest["selected_indexes"] = selected_list
     manifest["repeat_data"] = repeat_data
     return manifest
 
 
-def detect_segments(audio: np.ndarray, sample_rate: int, threshold: float | None = None) -> list[tuple[int, int]]:
+def detect_pilot_segments(audio: np.ndarray, sample_rate: int) -> list[tuple[int, int]]:
+    """Find likely frame boundaries by looking for the 880 Hz pilot tone."""
+    window = max(1, int(sample_rate * PILOT_DETECT_WINDOW_MS / 1000.0))
+    usable = len(audio) - (len(audio) % window)
+    if usable <= 0:
+        return []
+
+    blocks = audio[:usable].reshape((-1, window))
+    shaped = blocks * np.hanning(window).astype(np.float32)
+    spectrum = np.fft.rfft(shaped, axis=1)
+    magnitude = np.abs(spectrum)
+    pilot_bin = int(round(PILOT_HZ * window / sample_rate))
+    lo = max(0, pilot_bin - 1)
+    hi = min(magnitude.shape[1], pilot_bin + 2)
+    pilot_level = magnitude[:, lo:hi].sum(axis=1) / float(window)
+
+    peak = float(np.percentile(pilot_level, 98))
+    baseline = float(np.percentile(pilot_level, 50))
+    if peak <= max(0.01, baseline * 4.0):
+        return []
+
+    gate = max(peak * 0.45, baseline * 6.0)
+    active = pilot_level >= gate
+    min_pilot_blocks = max(2, int(round(0.08 * sample_rate / window)))
+
+    runs: list[tuple[int, int]] = []
+    start: int | None = None
+    for i, is_active in enumerate(active):
+        if is_active and start is None:
+            start = i
+        elif not is_active and start is not None:
+            if i - start >= min_pilot_blocks:
+                runs.append((start, i))
+            start = None
+    if start is not None and len(active) - start >= min_pilot_blocks:
+        runs.append((start, len(active)))
+
+    if not runs:
+        return []
+
+    pad = int(round(sample_rate * PILOT_DETECT_PAD_MS / 1000.0))
+    min_len = int(sample_rate * 0.25)
+    segments: list[tuple[int, int]] = []
+    for i, (run_start, _run_end) in enumerate(runs):
+        seg_start = max(0, run_start * window - pad)
+        if i + 1 < len(runs):
+            seg_end = max(seg_start, runs[i + 1][0] * window - pad // 2)
+        else:
+            seg_end = len(audio)
+        if seg_end - seg_start >= min_len:
+            segments.append((seg_start, seg_end))
+    return segments
+
+
+def detect_level_segments(audio: np.ndarray, sample_rate: int, threshold: float | None = None) -> list[tuple[int, int]]:
     window = max(1, int(sample_rate * 0.02))
     usable = len(audio) - (len(audio) % window)
     if usable <= 0:
@@ -388,6 +454,19 @@ def detect_segments(audio: np.ndarray, sample_rate: int, threshold: float | None
         else:
             merged.append((seg_start, seg_end))
     return merged
+
+
+def detect_segments(
+    audio: np.ndarray,
+    sample_rate: int,
+    threshold: float | None = None,
+    cfg: ModemConfig | None = None,
+) -> list[tuple[int, int]]:
+    if cfg is not None:
+        pilot_segments = detect_pilot_segments(audio, sample_rate)
+        if pilot_segments:
+            return pilot_segments
+    return detect_level_segments(audio, sample_rate, threshold=threshold)
 
 
 def demodulate_symbols(audio: np.ndarray, cfg: ModemConfig) -> np.ndarray:
@@ -537,6 +616,7 @@ def cmd_encode(args: argparse.Namespace) -> int:
         args.chunk_size,
         repeat_data=args.repeat_data,
         manifest_repeat=args.manifest_repeat,
+        tail_manifest_repeat=args.tail_manifest_repeat,
         write_frame_wavs=args.write_frame_wavs,
     )
     (out_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -567,6 +647,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
         selected=selected,
         repeat_data=args.repeat_data,
         manifest_repeat=args.manifest_repeat,
+        tail_manifest_repeat=args.tail_manifest_repeat,
         write_frame_wavs=args.write_frame_wavs,
     )
     (out_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -591,7 +672,7 @@ def cmd_decode(args: argparse.Namespace) -> int:
         sample_rate, audio = read_wav_mono(wav_path)
         if sample_rate != cfg.sample_rate:
             raise ValueError(f"{wav_path} sample rate is {sample_rate}, expected {cfg.sample_rate}")
-        segments = detect_segments(audio, sample_rate, threshold=args.threshold)
+        segments = detect_segments(audio, sample_rate, threshold=args.threshold, cfg=cfg)
         total_segments += len(segments)
         print(f"{wav_path.name}: detected {len(segments)} segment(s)")
         for start, end in segments:
@@ -641,6 +722,7 @@ def build_parser() -> argparse.ArgumentParser:
     enc.add_argument("--wav-name", default="transmit_all.wav")
     enc.add_argument("--repeat-data", type=int, default=1)
     enc.add_argument("--manifest-repeat", type=int, default=3)
+    enc.add_argument("--tail-manifest-repeat", type=int, default=3)
     enc.add_argument("--write-frame-wavs", action="store_true")
     enc.set_defaults(func=cmd_encode)
 
@@ -661,6 +743,7 @@ def build_parser() -> argparse.ArgumentParser:
     rep.add_argument("--wav-name", default="replay_missing.wav")
     rep.add_argument("--repeat-data", type=int, default=2)
     rep.add_argument("--manifest-repeat", type=int, default=2)
+    rep.add_argument("--tail-manifest-repeat", type=int, default=2)
     rep.add_argument("--write-frame-wavs", action="store_true")
     rep.set_defaults(func=cmd_replay)
     return parser

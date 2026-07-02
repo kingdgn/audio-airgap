@@ -356,7 +356,7 @@ class Handler(BaseHTTPRequestHandler):
             sample_rate, audio = audio_airgap.read_wav_mono(wav_path)
             if sample_rate != cfg.sample_rate:
                 raise ValueError(f"{filename}: sample rate {sample_rate}, expected {cfg.sample_rate}")
-            segments = audio_airgap.detect_segments(audio, sample_rate, threshold=threshold)
+            segments = audio_airgap.detect_segments(audio, sample_rate, threshold=threshold, cfg=cfg)
             total_segments += len(segments)
             for start, end in segments:
                 parsed = audio_airgap.try_decode_segment(audio[start:end], cfg, search_ms=search_ms)

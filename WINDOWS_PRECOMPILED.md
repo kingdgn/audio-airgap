@@ -29,4 +29,15 @@ windows\audio_airgap\audio_airgap.exe replay `
   --missing "0 37 40-45"
 ```
 
+Noisy room preset:
+
+```powershell
+windows\audio_airgap\audio_airgap.exe encode `
+  --input "D:\path\file.bin" `
+  --out-dir "D:\audio-out-noisy" `
+  --chunk-size 256 `
+  --channels 8 `
+  --symbol-ms 20
+```
+
 The `windows\audio_web\audio_web.exe` executable is only for local desktop testing. For phone use, prefer the static GitHub Pages receiver in `site\index.html`.
