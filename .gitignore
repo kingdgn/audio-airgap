@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+sessions/
+*.wav
+*.tmp
+audio-out*/
+audio-replay*/
+audio-decode*/
+dist/
+build/
+*.spec

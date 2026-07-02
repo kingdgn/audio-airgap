@@ -1,0 +1,8 @@
+*.exe binary
+*.dll binary
+*.pyd binary
+*.zip binary
+*.wav binary
+*.html text eol=lf
+*.md text eol=lf
+*.py text eol=lf

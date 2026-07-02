@@ -1,0 +1,721 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Audio Airgap Receiver</title>
+  <style>
+    :root {
+      --bg: #f6f7f4;
+      --panel: #ffffff;
+      --ink: #172326;
+      --muted: #617074;
+      --line: #d6dedf;
+      --accent: #0f766e;
+      --accent-dark: #0b5f59;
+      --ok: #067647;
+      --bad: #b42318;
+      --warn: #b54708;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+    header {
+      padding: 16px;
+      background: #fff;
+      border-bottom: 1px solid var(--line);
+    }
+    h1 {
+      margin: 0;
+      font-size: 20px;
+      line-height: 1.2;
+      font-weight: 700;
+    }
+    main {
+      display: grid;
+      grid-template-columns: 360px minmax(0, 1fr);
+      gap: 14px;
+      padding: 14px;
+      max-width: 1180px;
+      margin: 0 auto;
+    }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+    }
+    h2 {
+      margin: 0 0 12px;
+      font-size: 15px;
+      font-weight: 700;
+    }
+    label {
+      display: block;
+      margin: 10px 0 5px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+    }
+    input, select, button, textarea {
+      width: 100%;
+      font: inherit;
+    }
+    input, select, textarea {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 9px 10px;
+      background: #fff;
+      color: var(--ink);
+    }
+    textarea {
+      min-height: 118px;
+      resize: vertical;
+      font-family: Consolas, ui-monospace, monospace;
+      font-size: 12px;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .buttons {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 14px;
+    }
+    button {
+      border: 0;
+      border-radius: 6px;
+      padding: 10px 12px;
+      color: #fff;
+      background: var(--accent);
+      font-weight: 700;
+      cursor: pointer;
+      min-height: 42px;
+    }
+    button.secondary { background: #526166; }
+    button.danger { background: var(--bad); }
+    button:disabled {
+      opacity: .55;
+      cursor: wait;
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(120px, 1fr));
+      gap: 10px;
+    }
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #fbfcfb;
+      min-height: 78px;
+    }
+    .metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }
+    .metric strong {
+      display: block;
+      margin-top: 6px;
+      font-size: 22px;
+      line-height: 1.15;
+      overflow-wrap: anywhere;
+    }
+    .ok { color: var(--ok); }
+    .bad { color: var(--bad); }
+    .warn { color: var(--warn); }
+    .bar {
+      height: 10px;
+      background: #e5ecec;
+      border-radius: 99px;
+      overflow: hidden;
+      margin-top: 12px;
+    }
+    .bar > div {
+      height: 100%;
+      width: 0%;
+      background: var(--accent);
+      transition: width .2s ease;
+    }
+    .statusline {
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 13px;
+      min-height: 20px;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 12px;
+      align-items: center;
+    }
+    .actions a, .actions button {
+      width: auto;
+      min-height: 38px;
+      display: inline-flex;
+      align-items: center;
+      text-decoration: none;
+      border-radius: 6px;
+      padding: 9px 12px;
+    }
+    .actions a {
+      color: #fff;
+      background: var(--accent-dark);
+      font-weight: 700;
+    }
+    pre {
+      margin: 12px 0 0;
+      border-radius: 8px;
+      padding: 12px;
+      background: #111827;
+      color: #e5e7eb;
+      overflow: auto;
+      max-height: 280px;
+      font-size: 12px;
+    }
+    @media (max-width: 860px) {
+      main { grid-template-columns: 1fr; padding: 10px; }
+      .metrics { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Audio Airgap Receiver</h1>
+  </header>
+  <main>
+    <section>
+      <h2>Recorder</h2>
+      <div class="row">
+        <div>
+          <label for="channels">Channels</label>
+          <select id="channels">
+            <option value="12" selected>12 stable</option>
+            <option value="16">16 faster</option>
+            <option value="20">20 fastest</option>
+            <option value="8">8 conservative</option>
+          </select>
+        </div>
+        <div>
+          <label for="symbolMs">Symbol ms</label>
+          <select id="symbolMs">
+            <option value="10" selected>10</option>
+            <option value="20">20</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label for="threshold">Threshold</label>
+          <input id="threshold" type="number" value="0.012" min="0.001" max="0.2" step="0.001">
+        </div>
+        <div>
+          <label for="searchMs">Search ms</label>
+          <input id="searchMs" type="number" value="40" min="0" max="120" step="5">
+        </div>
+      </div>
+      <div class="buttons">
+        <button id="startBtn" type="button">Start</button>
+        <button id="stopBtn" class="danger" type="button" disabled>Stop</button>
+      </div>
+      <button id="resetBtn" class="secondary" type="button">Reset State</button>
+      <label for="missingText">Missing indexes</label>
+      <textarea id="missingText" readonly></textarea>
+      <div class="actions">
+        <button id="copyMissingBtn" class="secondary" type="button">Copy Missing</button>
+      </div>
+    </section>
+    <section>
+      <h2>Status</h2>
+      <div class="metrics">
+        <div class="metric"><span>Recording</span><strong id="recordingState">Idle</strong></div>
+        <div class="metric"><span>Valid Frames</span><strong id="validFrames">0</strong></div>
+        <div class="metric"><span>Received</span><strong id="received">0/0</strong></div>
+        <div class="metric"><span>SHA256</span><strong id="shaState">-</strong></div>
+      </div>
+      <div class="bar"><div id="progressBar"></div></div>
+      <div id="statusLine" class="statusline">Ready.</div>
+      <div id="downloadActions" class="actions"></div>
+      <pre id="log"></pre>
+    </section>
+  </main>
+
+  <script>
+    const MAGIC = [0x41, 0x4f, 0x44, 0x31]; // AOD1
+    const VERSION = 1;
+    const FRAME_MANIFEST = 1;
+    const FRAME_DATA = 2;
+    const PILOT_HZ = 880;
+    const PILOT_MS = 180;
+    const BLOCK_MS = 5;
+    const END_GAP_MS = 100;
+
+    let audioContext = null;
+    let stream = null;
+    let processor = null;
+    let zeroGain = null;
+    let pending = [];
+    let pendingLength = 0;
+    let active = false;
+    let segment = [];
+    let segmentLength = 0;
+    let inactiveSamples = 0;
+    let decoding = Promise.resolve();
+
+    const rx = {
+      manifest: null,
+      dataByFile: new Map(),
+      validFrames: 0,
+      badSegments: 0,
+      seenFrameKeys: new Set(),
+      downloadUrl: null
+    };
+
+    const els = {
+      startBtn: document.getElementById("startBtn"),
+      stopBtn: document.getElementById("stopBtn"),
+      resetBtn: document.getElementById("resetBtn"),
+      copyMissingBtn: document.getElementById("copyMissingBtn"),
+      channels: document.getElementById("channels"),
+      symbolMs: document.getElementById("symbolMs"),
+      threshold: document.getElementById("threshold"),
+      searchMs: document.getElementById("searchMs"),
+      recordingState: document.getElementById("recordingState"),
+      validFrames: document.getElementById("validFrames"),
+      received: document.getElementById("received"),
+      shaState: document.getElementById("shaState"),
+      progressBar: document.getElementById("progressBar"),
+      statusLine: document.getElementById("statusLine"),
+      missingText: document.getElementById("missingText"),
+      downloadActions: document.getElementById("downloadActions"),
+      log: document.getElementById("log")
+    };
+
+    const crcTable = (() => {
+      const table = new Uint32Array(256);
+      for (let i = 0; i < 256; i++) {
+        let c = i;
+        for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+        table[i] = c >>> 0;
+      }
+      return table;
+    })();
+
+    function crc32(bytes) {
+      let c = 0xffffffff;
+      for (let i = 0; i < bytes.length; i++) c = crcTable[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+      return (c ^ 0xffffffff) >>> 0;
+    }
+
+    function tonePlan(channels) {
+      const plan = [];
+      for (let ch = 0; ch < channels; ch++) {
+        const base = 1000 + ch * 600;
+        plan.push([base, base + 100, base + 200, base + 300]);
+      }
+      return plan;
+    }
+
+    function concatFloat32(parts, totalLength) {
+      const out = new Float32Array(totalLength);
+      let offset = 0;
+      for (const part of parts) {
+        out.set(part, offset);
+        offset += part.length;
+      }
+      return out;
+    }
+
+    function pushPending(input) {
+      const copy = new Float32Array(input.length);
+      copy.set(input);
+      pending.push(copy);
+      pendingLength += copy.length;
+    }
+
+    function shiftPending(count) {
+      const out = new Float32Array(count);
+      let filled = 0;
+      while (filled < count && pending.length) {
+        const first = pending[0];
+        const need = count - filled;
+        if (first.length <= need) {
+          out.set(first, filled);
+          filled += first.length;
+          pending.shift();
+          pendingLength -= first.length;
+        } else {
+          out.set(first.subarray(0, need), filled);
+          pending[0] = first.subarray(need);
+          pendingLength -= need;
+          filled += need;
+        }
+      }
+      return out;
+    }
+
+    function rms(block) {
+      let sum = 0;
+      for (let i = 0; i < block.length; i++) sum += block[i] * block[i];
+      return Math.sqrt(sum / Math.max(1, block.length));
+    }
+
+    function appendSegment(block) {
+      segment.push(block);
+      segmentLength += block.length;
+    }
+
+    function processPending() {
+      if (!audioContext) return;
+      const blockSize = Math.max(64, Math.round(audioContext.sampleRate * BLOCK_MS / 1000));
+      const endGap = Math.round(audioContext.sampleRate * END_GAP_MS / 1000);
+      const minSegment = Math.round(audioContext.sampleRate * 0.25);
+      const threshold = Number(els.threshold.value || "0.012");
+
+      while (pendingLength >= blockSize) {
+        const block = shiftPending(blockSize);
+        const isActive = rms(block) >= threshold;
+        if (isActive) {
+          if (!active) {
+            active = true;
+            segment = [];
+            segmentLength = 0;
+            inactiveSamples = 0;
+          }
+          appendSegment(block);
+          inactiveSamples = 0;
+        } else if (active) {
+          appendSegment(block);
+          inactiveSamples += block.length;
+          if (inactiveSamples >= endGap) {
+            const finished = concatFloat32(segment, segmentLength);
+            active = false;
+            segment = [];
+            segmentLength = 0;
+            inactiveSamples = 0;
+            if (finished.length >= minSegment) {
+              decoding = decoding.then(() => decodeSegment(finished)).catch(err => logLine(String(err)));
+            }
+          }
+        }
+      }
+    }
+
+    function goertzelPower(samples, start, n, freq, sampleRate) {
+      const omega = 2 * Math.PI * freq / sampleRate;
+      const coeff = 2 * Math.cos(omega);
+      let q0 = 0, q1 = 0, q2 = 0;
+      const end = Math.min(samples.length, start + n);
+      for (let i = start; i < end; i++) {
+        q0 = coeff * q1 - q2 + samples[i];
+        q2 = q1;
+        q1 = q0;
+      }
+      return q1 * q1 + q2 * q2 - coeff * q1 * q2;
+    }
+
+    function demodulateBytes(samples, dataStart, byteLimit, cfg) {
+      const n = Math.round(cfg.sampleRate * cfg.symbolMs / 1000);
+      const bytesPerSymbol = cfg.channels / 4;
+      const symbolsNeeded = Math.ceil(byteLimit / bytesPerSymbol);
+      const symbolsAvailable = Math.floor((samples.length - dataStart) / n);
+      const symbolCount = Math.min(symbolsNeeded, symbolsAvailable);
+      if (symbolCount <= 0) return new Uint8Array();
+
+      const bits = [];
+      for (let s = 0; s < symbolCount; s++) {
+        const start = dataStart + s * n;
+        for (let ch = 0; ch < cfg.channels; ch++) {
+          let best = 0;
+          let bestPower = -Infinity;
+          for (let value = 0; value < 4; value++) {
+            const power = goertzelPower(samples, start, n, cfg.plan[ch][value], cfg.sampleRate);
+            if (power > bestPower) {
+              bestPower = power;
+              best = value;
+            }
+          }
+          bits.push((best >> 1) & 1, best & 1);
+        }
+      }
+
+      const byteCount = Math.floor(bits.length / 8);
+      const out = new Uint8Array(byteCount);
+      for (let i = 0; i < byteCount; i++) {
+        let b = 0;
+        for (let bit = 0; bit < 8; bit++) b = (b << 1) | bits[i * 8 + bit];
+        out[i] = b;
+      }
+      return out;
+    }
+
+    function parseHeader(bytes) {
+      if (bytes.length < 24) return null;
+      for (let i = 0; i < 4; i++) if (bytes[i] !== MAGIC[i]) return null;
+      if (bytes[4] !== VERSION) return null;
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const payloadLen = view.getUint16(18, false);
+      const frameLen = 20 + payloadLen + 4;
+      if (frameLen < 24 || frameLen > 4096) return null;
+      return { frameLen, payloadLen };
+    }
+
+    function parseFrame(bytes) {
+      const header = parseHeader(bytes);
+      if (!header || bytes.length < header.frameLen) return null;
+      const frame = bytes.subarray(0, header.frameLen);
+      const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+      const expected = view.getUint32(header.frameLen - 4, false);
+      const actual = crc32(frame.subarray(0, header.frameLen - 4));
+      if (expected !== actual) return null;
+      return {
+        type: view.getUint8(5),
+        fileId: Array.from(frame.subarray(6, 10)).map(b => b.toString(16).padStart(2, "0")).join("").toUpperCase(),
+        index: view.getUint32(10, false),
+        total: view.getUint32(14, false),
+        payload: frame.subarray(20, header.frameLen - 4)
+      };
+    }
+
+    function offsetsForSearch(sampleRate, searchMs) {
+      const values = [0];
+      const max = Math.round(sampleRate * searchMs / 1000);
+      const step = Math.max(1, Math.round(sampleRate * 0.002));
+      for (let delta = step; delta <= max; delta += step) values.push(delta, -delta);
+      return values;
+    }
+
+    async function decodeSegment(samples) {
+      const cfg = currentConfig();
+      const pilotSamples = Math.round(cfg.sampleRate * PILOT_MS / 1000);
+      const searchMs = Number(els.searchMs.value || "40");
+      for (const offset of offsetsForSearch(cfg.sampleRate, searchMs)) {
+        const start = pilotSamples + offset;
+        if (start < 0 || start >= samples.length) continue;
+        const headerBytes = demodulateBytes(samples, start, 24, cfg);
+        const header = parseHeader(headerBytes);
+        if (!header) continue;
+        const fullBytes = demodulateBytes(samples, start, header.frameLen, cfg);
+        const frame = parseFrame(fullBytes);
+        if (frame) {
+          acceptFrame(frame);
+          return;
+        }
+      }
+      rx.badSegments += 1;
+      updateUi();
+    }
+
+    function currentConfig() {
+      const channels = Number(els.channels.value);
+      const symbolMs = Number(els.symbolMs.value);
+      return {
+        sampleRate: audioContext ? audioContext.sampleRate : 48000,
+        channels,
+        symbolMs,
+        plan: tonePlan(channels)
+      };
+    }
+
+    function acceptFrame(frame) {
+      const key = `${frame.fileId}:${frame.type}:${frame.index}`;
+      if (rx.seenFrameKeys.has(key)) {
+        updateUi();
+        return;
+      }
+      rx.seenFrameKeys.add(key);
+      rx.validFrames += 1;
+      if (frame.type === FRAME_MANIFEST) {
+        const text = new TextDecoder().decode(frame.payload);
+        rx.manifest = JSON.parse(text);
+        logLine(`manifest ${rx.manifest.filename}, total=${rx.manifest.total}`);
+      } else if (frame.type === FRAME_DATA) {
+        if (!rx.dataByFile.has(frame.fileId)) rx.dataByFile.set(frame.fileId, new Map());
+        rx.dataByFile.get(frame.fileId).set(frame.index, frame.payload.slice());
+      }
+      updateUi();
+      maybeRecover();
+    }
+
+    function targetData() {
+      if (!rx.manifest) return { fileId: null, data: new Map(), total: 0 };
+      const fileId = String(rx.manifest.file_id).toUpperCase();
+      return { fileId, data: rx.dataByFile.get(fileId) || new Map(), total: Number(rx.manifest.total || 0) };
+    }
+
+    function missingList() {
+      const { data, total } = targetData();
+      const missing = [];
+      for (let i = 0; i < total; i++) if (!data.has(i)) missing.push(i);
+      return missing;
+    }
+
+    function updateUi() {
+      const { data, total } = targetData();
+      const received = data.size;
+      const missing = missingList();
+      els.validFrames.textContent = String(rx.validFrames);
+      els.received.textContent = `${received}/${total || 0}`;
+      els.missingText.value = missing.join(" ");
+      els.progressBar.style.width = total ? `${Math.min(100, received * 100 / total)}%` : "0%";
+      if (!rx.manifest) {
+        els.shaState.textContent = "-";
+        els.shaState.className = "";
+      }
+      els.statusLine.textContent = rx.manifest
+        ? `${rx.manifest.filename} | missing ${missing.length} | bad segments ${rx.badSegments}`
+        : `waiting for manifest | bad segments ${rx.badSegments}`;
+      els.log.textContent = JSON.stringify({
+        manifest_seen: !!rx.manifest,
+        valid_frames: rx.validFrames,
+        received,
+        total,
+        missing_count: missing.length,
+        bad_segments: rx.badSegments,
+        sample_rate: audioContext ? audioContext.sampleRate : null
+      }, null, 2);
+    }
+
+    async function maybeRecover() {
+      if (!rx.manifest) return;
+      const { data, total } = targetData();
+      if (!total || data.size < total) return;
+      const chunks = [];
+      let size = 0;
+      for (let i = 0; i < total; i++) {
+        const chunk = data.get(i);
+        if (!chunk) return;
+        chunks.push(chunk);
+        size += chunk.length;
+      }
+      const all = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of chunks) {
+        all.set(chunk, offset);
+        offset += chunk.length;
+      }
+      const expectedSize = Number(rx.manifest.size || all.length);
+      const trimmed = all.subarray(0, expectedSize);
+      const hash = await sha256Hex(trimmed);
+      const ok = hash.toLowerCase() === String(rx.manifest.sha256).toLowerCase();
+      els.shaState.textContent = ok ? "OK" : "FAIL";
+      els.shaState.className = ok ? "ok" : "bad";
+      if (rx.downloadUrl) URL.revokeObjectURL(rx.downloadUrl);
+      const blob = new Blob([trimmed], { type: "application/octet-stream" });
+      rx.downloadUrl = URL.createObjectURL(blob);
+      els.downloadActions.innerHTML = "";
+      const link = document.createElement("a");
+      link.href = rx.downloadUrl;
+      link.download = rx.manifest.filename || "recovered.bin";
+      link.textContent = "Download File";
+      els.downloadActions.appendChild(link);
+      logLine(`recovered sha256=${hash} ok=${ok}`);
+    }
+
+    async function sha256Hex(bytes) {
+      const digest = await crypto.subtle.digest("SHA-256", bytes);
+      return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, "0")).join("");
+    }
+
+    function logLine(text) {
+      const current = els.log.textContent ? `${els.log.textContent}\n` : "";
+      els.log.textContent = `${current}${new Date().toLocaleTimeString()} ${text}`.slice(-8000);
+    }
+
+    async function startRecording() {
+      resetRuntimeBuffers();
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          channelCount: 1
+        }
+      });
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioContext.createMediaStreamSource(stream);
+      processor = audioContext.createScriptProcessor(4096, 1, 1);
+      zeroGain = audioContext.createGain();
+      zeroGain.gain.value = 0;
+      processor.onaudioprocess = event => {
+        pushPending(event.inputBuffer.getChannelData(0));
+        processPending();
+      };
+      source.connect(processor);
+      processor.connect(zeroGain);
+      zeroGain.connect(audioContext.destination);
+      els.startBtn.disabled = true;
+      els.stopBtn.disabled = false;
+      els.recordingState.textContent = "On";
+      els.recordingState.className = "ok";
+      updateUi();
+    }
+
+    async function stopRecording() {
+      if (processor) processor.disconnect();
+      if (zeroGain) zeroGain.disconnect();
+      if (stream) stream.getTracks().forEach(track => track.stop());
+      if (audioContext) await audioContext.close();
+      audioContext = null;
+      stream = null;
+      processor = null;
+      zeroGain = null;
+      els.startBtn.disabled = false;
+      els.stopBtn.disabled = true;
+      els.recordingState.textContent = "Idle";
+      els.recordingState.className = "";
+      updateUi();
+    }
+
+    function resetRuntimeBuffers() {
+      pending = [];
+      pendingLength = 0;
+      active = false;
+      segment = [];
+      segmentLength = 0;
+      inactiveSamples = 0;
+      decoding = Promise.resolve();
+    }
+
+    function resetState() {
+      if (rx.downloadUrl) URL.revokeObjectURL(rx.downloadUrl);
+      rx.manifest = null;
+      rx.dataByFile = new Map();
+      rx.validFrames = 0;
+      rx.badSegments = 0;
+      rx.seenFrameKeys = new Set();
+      rx.downloadUrl = null;
+      els.downloadActions.innerHTML = "";
+      els.shaState.textContent = "-";
+      els.shaState.className = "";
+      resetRuntimeBuffers();
+      updateUi();
+    }
+
+    els.startBtn.addEventListener("click", () => {
+      startRecording().catch(error => {
+        els.statusLine.textContent = String(error);
+        els.startBtn.disabled = false;
+        els.stopBtn.disabled = true;
+      });
+    });
+    els.stopBtn.addEventListener("click", () => stopRecording());
+    els.resetBtn.addEventListener("click", () => resetState());
+    els.copyMissingBtn.addEventListener("click", async () => {
+      await navigator.clipboard.writeText(els.missingText.value);
+      els.statusLine.textContent = "Missing list copied.";
+    });
+    updateUi();
+  </script>
+</body>
+</html>
