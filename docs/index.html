@@ -281,6 +281,7 @@
       <div class="metrics">
         <div class="metric"><span>录音状态</span><strong id="recordingState">待机</strong></div>
         <div class="metric"><span>有效帧</span><strong id="validFrames">0</strong></div>
+        <div class="metric"><span>纠错恢复</span><strong id="correctedFrames">0</strong></div>
         <div class="metric"><span>已接收</span><strong id="received">0/0</strong></div>
         <div class="metric"><span>SHA256</span><strong id="shaState">-</strong></div>
         <div class="metric"><span>录音缓存</span><strong id="recordedTime">0s</strong></div>
@@ -309,6 +310,11 @@
     const PILOT_MS = 180;
     const BLOCK_MS = 10;
     const END_GAP_MS = 100;
+    const SOFT_CORRECT_MAX_CANDIDATES = 34;
+    const SOFT_CORRECT_MAX_CHANGES = 5;
+    const SOFT_CORRECT_MAX_ATTEMPTS = 80000;
+    const SOFT_CORRECT_MAX_FRAME_BYTES = 4096;
+    const SOFT_CORRECT_MAX_OFFSET_CANDIDATES = 6;
 
     let audioContext = null;
     let stream = null;
@@ -331,6 +337,7 @@
       manifest: null,
       dataByFile: new Map(),
       validFrames: 0,
+      correctedFrames: 0,
       badSegments: 0,
       seenFrameKeys: new Set(),
       downloadUrl: null
@@ -349,6 +356,7 @@
       searchMs: document.getElementById("searchMs"),
       recordingState: document.getElementById("recordingState"),
       validFrames: document.getElementById("validFrames"),
+      correctedFrames: document.getElementById("correctedFrames"),
       received: document.getElementById("received"),
       shaState: document.getElementById("shaState"),
       recordedTime: document.getElementById("recordedTime"),
@@ -515,6 +523,7 @@
         searchMs: Number(els.searchMs.value || "120"),
         manifest: rx.manifest,
         validFrames: rx.validFrames,
+        correctedFrames: rx.correctedFrames,
         received: data.size,
         total,
         missing: missingList(),
@@ -647,39 +656,122 @@
       return q1 * q1 + q2 * q2 - coeff * q1 * q2;
     }
 
-    function demodulateBytes(samples, dataStart, byteLimit, cfg) {
+    function demodulateSoft(samples, dataStart, byteLimit, cfg) {
       const n = Math.round(cfg.sampleRate * cfg.symbolMs / 1000);
       const bytesPerSymbol = cfg.channels / 4;
       const symbolsNeeded = Math.ceil(byteLimit / bytesPerSymbol);
       const symbolsAvailable = Math.floor((samples.length - dataStart) / n);
       const symbolCount = Math.min(symbolsNeeded, symbolsAvailable);
-      if (symbolCount <= 0) return new Uint8Array();
+      const cellCount = Math.max(0, symbolCount * cfg.channels);
+      const hard = new Uint8Array(cellCount);
+      const alt1 = new Uint8Array(cellCount);
+      const alt2 = new Uint8Array(cellCount);
+      const margin = new Float32Array(cellCount);
+      if (symbolCount <= 0) return { hard, alt1, alt2, margin, symbolCount, channels: cfg.channels };
 
-      const bits = [];
       for (let s = 0; s < symbolCount; s++) {
         const start = dataStart + s * n;
         for (let ch = 0; ch < cfg.channels; ch++) {
-          let best = 0;
-          let bestPower = -Infinity;
+          let best = 0, second = 0, third = 0;
+          let bestPower = -Infinity, secondPower = -Infinity, thirdPower = -Infinity;
           for (let value = 0; value < 4; value++) {
             const power = goertzelPower(samples, start, n, cfg.plan[ch][value], cfg.sampleRate);
             if (power > bestPower) {
-              bestPower = power;
+              third = second;
+              thirdPower = secondPower;
+              second = best;
+              secondPower = bestPower;
               best = value;
+              bestPower = power;
+            } else if (power > secondPower) {
+              third = second;
+              thirdPower = secondPower;
+              second = value;
+              secondPower = power;
+            } else if (power > thirdPower) {
+              third = value;
+              thirdPower = power;
             }
           }
-          bits.push((best >> 1) & 1, best & 1);
+          const pos = s * cfg.channels + ch;
+          hard[pos] = best;
+          alt1[pos] = second;
+          alt2[pos] = third;
+          margin[pos] = (bestPower - secondPower) / Math.max(bestPower, 1e-12);
         }
       }
+      return { hard, alt1, alt2, margin, symbolCount, channels: cfg.channels };
+    }
 
-      const byteCount = Math.floor(bits.length / 8);
+    function symbolsToBytes(symbols, symbolCount, channels) {
+      const byteCount = Math.floor(symbolCount * channels * 2 / 8);
       const out = new Uint8Array(byteCount);
-      for (let i = 0; i < byteCount; i++) {
-        let b = 0;
-        for (let bit = 0; bit < 8; bit++) b = (b << 1) | bits[i * 8 + bit];
-        out[i] = b;
+      let outIndex = 0;
+      let current = 0;
+      let bitCount = 0;
+      for (let s = 0; s < symbolCount; s++) {
+        for (let ch = 0; ch < channels; ch++) {
+          const value = symbols[s * channels + ch];
+          const hi = (value >> 1) & 1;
+          const lo = value & 1;
+          current = (current << 1) | hi;
+          bitCount += 1;
+          if (bitCount === 8) {
+            out[outIndex++] = current;
+            current = 0;
+            bitCount = 0;
+          }
+          current = (current << 1) | lo;
+          bitCount += 1;
+          if (bitCount === 8) {
+            out[outIndex++] = current;
+            current = 0;
+            bitCount = 0;
+          }
+        }
       }
       return out;
+    }
+
+    function demodulateBytes(samples, dataStart, byteLimit, cfg) {
+      const soft = demodulateSoft(samples, dataStart, byteLimit, cfg);
+      return symbolsToBytes(soft.hard, soft.symbolCount, cfg.channels);
+    }
+
+    function byteBitCount(value) {
+      value &= 0xff;
+      let count = 0;
+      while (value) {
+        value &= value - 1;
+        count += 1;
+      }
+      return count;
+    }
+
+    function byteHammingDistance(left, right) {
+      const limit = Math.min(left.length, right.length);
+      let distance = 0;
+      for (let i = 0; i < limit; i++) distance += byteBitCount(left[i] ^ right[i]);
+      return distance;
+    }
+
+    function plausibleFrameLen(bytes, requireFull = true) {
+      if (bytes.length < 24) return null;
+      const expectedPrefix = new Uint8Array([...MAGIC, VERSION]);
+      if (byteHammingDistance(bytes.subarray(0, 5), expectedPrefix) > 8) return null;
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const payloadLen = view.getUint16(18, false);
+      const frameLen = 20 + payloadLen + 4;
+      if (frameLen < 24 || frameLen > SOFT_CORRECT_MAX_FRAME_BYTES) return null;
+      if (requireFull && bytes.length < frameLen) return null;
+      return frameLen;
+    }
+
+    function correctionHeaderScore(bytes, offset) {
+      const prefix = new Uint8Array([...MAGIC, VERSION]);
+      const prefixScore = bytes.length >= 5 ? byteHammingDistance(bytes.subarray(0, 5), prefix) : 99;
+      const typePenalty = bytes.length > 5 && (bytes[5] === FRAME_MANIFEST || bytes[5] === FRAME_DATA) ? 0 : 2;
+      return prefixScore + typePenalty + Math.abs(offset) / 100000;
     }
 
     function parseHeader(bytes) {
@@ -708,6 +800,78 @@
         total: view.getUint32(14, false),
         payload: frame.subarray(20, header.frameLen - 4)
       };
+    }
+
+
+    function tryCorrectFrame(soft, cfg) {
+      if (!soft.symbolCount) return null;
+      const hardBytes = symbolsToBytes(soft.hard, soft.symbolCount, cfg.channels);
+      const frameLen = plausibleFrameLen(hardBytes, true);
+      if (!frameLen) return null;
+
+      const hardFrame = parseFrame(hardBytes.subarray(0, frameLen));
+      if (hardFrame) return hardFrame;
+
+      const bytesPerSymbol = cfg.channels / 4;
+      const symbolLimit = Math.min(soft.symbolCount, Math.ceil(frameLen / bytesPerSymbol));
+      if (!symbolLimit) return null;
+
+      const candidates = [];
+      for (let s = 0; s < symbolLimit; s++) {
+        for (let ch = 0; ch < cfg.channels; ch++) {
+          const pos = s * cfg.channels + ch;
+          const current = soft.hard[pos];
+          const first = soft.alt1[pos];
+          const second = soft.alt2[pos];
+          if (first !== current) candidates.push({ score: soft.margin[pos], pos, value: first });
+          if (second !== current && second !== first) candidates.push({ score: soft.margin[pos] + 0.055, pos, value: second });
+        }
+      }
+      candidates.sort((a, b) => a.score - b.score);
+      const limited = candidates.slice(0, SOFT_CORRECT_MAX_CANDIDATES);
+      const base = soft.hard.subarray(0, symbolLimit * cfg.channels);
+      const combo = [];
+      const used = new Set();
+      let attempts = 0;
+
+      function testCombo() {
+        attempts += 1;
+        const corrected = new Uint8Array(base);
+        for (const item of combo) corrected[item.pos] = item.value;
+        const bytes = symbolsToBytes(corrected, symbolLimit, cfg.channels).subarray(0, frameLen);
+        const frame = parseFrame(bytes);
+        if (frame) {
+          frame.corrected = true;
+          frame.corrections = combo.length;
+          return frame;
+        }
+        return null;
+      }
+
+      function walk(start, depth, targetDepth) {
+        if (attempts >= SOFT_CORRECT_MAX_ATTEMPTS) return null;
+        if (depth === targetDepth) return testCombo();
+        const remaining = targetDepth - depth;
+        for (let i = start; i <= limited.length - remaining; i++) {
+          const item = limited[i];
+          if (used.has(item.pos)) continue;
+          used.add(item.pos);
+          combo[depth] = item;
+          const found = walk(i + 1, depth + 1, targetDepth);
+          combo.length = depth;
+          used.delete(item.pos);
+          if (found) return found;
+          if (attempts >= SOFT_CORRECT_MAX_ATTEMPTS) return null;
+        }
+        return null;
+      }
+
+      for (let changes = 1; changes <= SOFT_CORRECT_MAX_CHANGES; changes++) {
+        const found = walk(0, 0, changes);
+        if (found) return found;
+        if (attempts >= SOFT_CORRECT_MAX_ATTEMPTS) return null;
+      }
+      return null;
     }
 
     function offsetsForSearch(sampleRate, searchMs) {
@@ -758,15 +922,27 @@
 
     function tryDecodeOne(samples, cfg, searchMs) {
       const pilotSamples = Math.round(cfg.sampleRate * PILOT_MS / 1000);
+      const correctionCandidates = [];
       for (const offset of offsetsForSearch(cfg.sampleRate, searchMs)) {
         const start = pilotSamples + offset;
         if (start < 0 || start >= samples.length) continue;
         const headerBytes = demodulateBytes(samples, start, 24, cfg);
         const header = parseHeader(headerBytes);
-        if (!header) continue;
-        const fullBytes = demodulateBytes(samples, start, header.frameLen, cfg);
+        const frameLen = header ? header.frameLen : plausibleFrameLen(headerBytes, false);
+        if (!frameLen) continue;
+        const soft = demodulateSoft(samples, start, frameLen, cfg);
+        const fullBytes = symbolsToBytes(soft.hard, soft.symbolCount, cfg.channels);
         const frame = parseFrame(fullBytes);
         if (frame) return frame;
+        if (plausibleFrameLen(fullBytes, true)) {
+          correctionCandidates.push({ score: correctionHeaderScore(fullBytes, offset), soft });
+        }
+      }
+
+      correctionCandidates.sort((a, b) => a.score - b.score);
+      for (const candidate of correctionCandidates.slice(0, SOFT_CORRECT_MAX_OFFSET_CANDIDATES)) {
+        const corrected = tryCorrectFrame(candidate.soft, cfg);
+        if (corrected) return corrected;
       }
       return null;
     }
@@ -809,6 +985,11 @@
       }
       rx.seenFrameKeys.add(key);
       rx.validFrames += 1;
+      if (frame.corrected) {
+        rx.correctedFrames += 1;
+        const kind = frame.type === FRAME_MANIFEST ? "清单" : "数据";
+        logLine(`CRC 纠错恢复${kind}帧 index=${frame.index}，修正 ${frame.corrections || 0} 个符号`);
+      }
       if (frame.type === FRAME_MANIFEST) {
         const text = new TextDecoder().decode(frame.payload);
         rx.manifest = JSON.parse(text);
@@ -839,6 +1020,7 @@
       const received = data.size;
       const missing = missingList();
       els.validFrames.textContent = String(rx.validFrames);
+      els.correctedFrames.textContent = String(rx.correctedFrames);
       els.received.textContent = `${received}/${total || 0}`;
       els.missingText.value = missing.join(" ");
       els.progressBar.style.width = total ? `${Math.min(100, received * 100 / total)}%` : "0%";
@@ -852,6 +1034,7 @@
       els.log.textContent = JSON.stringify({
         "已收到清单": !!rx.manifest,
         "有效帧": rx.validFrames,
+        "纠错恢复": rx.correctedFrames,
         "已接收": received,
         "总片数": total,
         "缺失数量": missing.length,
@@ -984,6 +1167,7 @@
       rx.manifest = null;
       rx.dataByFile = new Map();
       rx.validFrames = 0;
+      rx.correctedFrames = 0;
       rx.badSegments = 0;
       rx.seenFrameKeys = new Set();
       rx.downloadUrl = null;

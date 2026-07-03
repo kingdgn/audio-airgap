@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import itertools
 import json
 import math
 import re
@@ -47,6 +48,12 @@ PILOT_MS = 180
 GAP_MS = 160
 PILOT_DETECT_WINDOW_MS = 20
 PILOT_DETECT_PAD_MS = 60
+
+SOFT_CORRECT_MAX_CANDIDATES = 34
+SOFT_CORRECT_MAX_CHANGES = 5
+SOFT_CORRECT_MAX_ATTEMPTS = 80_000
+SOFT_CORRECT_MAX_FRAME_BYTES = 4096
+SOFT_CORRECT_MAX_OFFSET_CANDIDATES = 6
 
 
 @dataclass(frozen=True)
@@ -103,6 +110,14 @@ class ParsedFrame:
     index: int
     total: int
     payload: bytes
+
+
+@dataclass
+class SoftSymbols:
+    hard: np.ndarray
+    alt1: np.ndarray
+    alt2: np.ndarray
+    margin: np.ndarray
 
 
 def sha256_file(path: Path) -> str:
@@ -469,11 +484,38 @@ def detect_segments(
     return detect_level_segments(audio, sample_rate, threshold=threshold)
 
 
-def demodulate_symbols(audio: np.ndarray, cfg: ModemConfig) -> np.ndarray:
+def byte_hamming_distance(left: bytes, right: bytes) -> int:
+    return sum((a ^ b).bit_count() for a, b in zip(left, right))
+
+
+def plausible_frame_len(data: bytes, require_full: bool = True) -> int | None:
+    if len(data) < 24:
+        return None
+
+    expected_prefix = MAGIC + bytes([VERSION])
+    if byte_hamming_distance(data[:5], expected_prefix) > 8:
+        return None
+
+    payload_len = struct.unpack(">H", data[18:20])[0]
+    frame_len = 20 + payload_len + 4
+    if frame_len < 24 or frame_len > SOFT_CORRECT_MAX_FRAME_BYTES:
+        return None
+    if require_full and len(data) < frame_len:
+        return None
+    return frame_len
+
+
+def correction_header_score(data: bytes, offset: int) -> tuple[int, int]:
+    prefix_score = byte_hamming_distance(data[:5], MAGIC + bytes([VERSION])) if len(data) >= 5 else 99
+    type_penalty = 0 if len(data) > 5 and data[5] in (FRAME_MANIFEST, FRAME_DATA) else 2
+    return (prefix_score + type_penalty, abs(offset))
+
+def demodulate_soft_symbols(audio: np.ndarray, cfg: ModemConfig) -> SoftSymbols:
     n = cfg.symbol_samples
     symbol_count = len(audio) // n
+    empty = np.zeros((0, cfg.channels), dtype=np.uint8)
     if symbol_count <= 0:
-        return np.zeros((0, cfg.channels), dtype=np.uint8)
+        return SoftSymbols(empty, empty.copy(), empty.copy(), empty.astype(np.float32))
 
     plan = cfg.tone_plan()
     freqs = np.array(plan, dtype=np.float32)
@@ -483,16 +525,89 @@ def demodulate_symbols(audio: np.ndarray, cfg: ModemConfig) -> np.ndarray:
     spectrum = np.fft.rfft(shaped * window, axis=1)
     magnitude = np.abs(spectrum)
 
-    symbols = np.zeros((symbol_count, cfg.channels), dtype=np.uint8)
+    scores = np.zeros((symbol_count, cfg.channels, 4), dtype=np.float32)
     for ch in range(cfg.channels):
-        energies = []
         for value in range(4):
             b = bins[ch, value]
             lo = max(0, b - 1)
             hi = min(magnitude.shape[1], b + 2)
-            energies.append(magnitude[:, lo:hi].sum(axis=1))
-        symbols[:, ch] = np.argmax(np.vstack(energies).T, axis=1).astype(np.uint8)
-    return symbols
+            scores[:, ch, value] = magnitude[:, lo:hi].sum(axis=1)
+
+    order = np.argsort(scores, axis=2)
+    hard = order[:, :, -1].astype(np.uint8)
+    alt1 = order[:, :, -2].astype(np.uint8)
+    alt2 = order[:, :, -3].astype(np.uint8)
+    best = np.take_along_axis(scores, order[:, :, -1:], axis=2).squeeze(axis=2)
+    second = np.take_along_axis(scores, order[:, :, -2:-1], axis=2).squeeze(axis=2)
+    margin = ((best - second) / np.maximum(best, 1e-9)).astype(np.float32)
+    return SoftSymbols(hard, alt1, alt2, margin)
+
+
+def demodulate_symbols(audio: np.ndarray, cfg: ModemConfig) -> np.ndarray:
+    return demodulate_soft_symbols(audio, cfg).hard
+
+
+def try_correct_soft_frame(soft: SoftSymbols, cfg: ModemConfig) -> ParsedFrame | None:
+    if soft.hard.size == 0:
+        return None
+
+    hard_bytes = symbols_to_bytes(soft.hard)
+    frame_len = plausible_frame_len(hard_bytes, require_full=True)
+    if frame_len is None:
+        return None
+
+    parsed = parse_frame(hard_bytes[:frame_len])
+    if parsed is not None:
+        return parsed
+
+    symbol_limit = min(soft.hard.shape[0], math.ceil(frame_len / cfg.bytes_per_symbol))
+    if symbol_limit <= 0:
+        return None
+
+    candidates: list[tuple[float, int, int, int]] = []
+    for s in range(symbol_limit):
+        for ch in range(cfg.channels):
+            current = int(soft.hard[s, ch])
+            values: list[tuple[int, float]] = []
+            first = int(soft.alt1[s, ch])
+            second = int(soft.alt2[s, ch])
+            if first != current:
+                values.append((first, 0.0))
+            if second != current and second != first:
+                values.append((second, 0.055))
+            for value, penalty in values:
+                candidates.append((float(soft.margin[s, ch]) + penalty, s, ch, value))
+
+    candidates.sort(key=lambda item: item[0])
+    candidates = candidates[:SOFT_CORRECT_MAX_CANDIDATES]
+    base_symbols = soft.hard[:symbol_limit].copy()
+    attempts = 0
+
+    for change_count in range(1, SOFT_CORRECT_MAX_CHANGES + 1):
+        for combo in itertools.combinations(candidates, change_count):
+            used: set[tuple[int, int]] = set()
+            valid_combo = True
+            for _, s, ch, _ in combo:
+                cell = (s, ch)
+                if cell in used:
+                    valid_combo = False
+                    break
+                used.add(cell)
+            if not valid_combo:
+                continue
+
+            attempts += 1
+            if attempts > SOFT_CORRECT_MAX_ATTEMPTS:
+                return None
+
+            corrected = base_symbols.copy()
+            for _, s, ch, value in combo:
+                corrected[s, ch] = value
+            parsed = parse_frame(symbols_to_bytes(corrected)[:frame_len])
+            if parsed is not None:
+                return parsed
+
+    return None
 
 
 def try_decode_segment(segment: np.ndarray, cfg: ModemConfig, search_ms: int = 5) -> ParsedFrame | None:
@@ -504,14 +619,26 @@ def try_decode_segment(segment: np.ndarray, cfg: ModemConfig, search_ms: int = 5
     for delta in range(step, search_samples + 1, step):
         offsets.extend([delta, -delta])
 
+    correction_candidates: list[tuple[tuple[int, int], SoftSymbols]] = []
     for offset in offsets:
         start = pilot_samples + offset
         if start < 0 or start >= len(segment):
             continue
-        symbols = demodulate_symbols(segment[start:], cfg)
-        if symbols.size == 0:
+        soft = demodulate_soft_symbols(segment[start:], cfg)
+        if soft.hard.size == 0:
             continue
-        parsed = parse_frame(symbols_to_bytes(symbols))
+
+        hard_bytes = symbols_to_bytes(soft.hard)
+        parsed = parse_frame(hard_bytes)
+        if parsed is not None:
+            return parsed
+
+        if plausible_frame_len(hard_bytes, require_full=True) is not None:
+            correction_candidates.append((correction_header_score(hard_bytes, offset), soft))
+
+    correction_candidates.sort(key=lambda item: item[0])
+    for _, soft in correction_candidates[:SOFT_CORRECT_MAX_OFFSET_CANDIDATES]:
+        parsed = try_correct_soft_frame(soft, cfg)
         if parsed is not None:
             return parsed
     return None
